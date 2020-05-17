@@ -1,0 +1,434 @@
+---
+title: "A Data Science Walkthrough Using Google Play Store App Data"
+author: "Jim Kong"
+date: "5/16/2020"
+output: html_document
+---
+
+# 1  Introduction
+
+There's no end to the amount of apps being developed, just as there's no end to the potential profit from the mobile market. It doesn't take much to understand why individual developers and companies alike would be interested in seeing their software grow in popularity, so we will attempt to investigate the factors that encourage a user to install one's app using publicly-available data scraped from the Google Play Store by Lavanya Gupta. Once the provided data set is tidied and ready for study, we will perform some exploratory data analysis to discover attribute relationships before finally trying out predictive modeling.
+
+# 2  Data Preparation
+
+Before anything else, the data set must be made suitable for analysis. We will use *R* as our language of choice to accomplish this.
+
+## 2.1  R Libraries
+
+The only functions we will be utilizing more than once outside of base R are loaded here. One-off function calls will have their appropriate libraries (e.g., `caret`, `tree`) prepended to their invocations.
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)  # For tidying data
+library(ggplot2)    # For plotting data
+```
+
+## 2.2  Loading and Checking
+
+Let's take a look at the initial state of the data set immediately after downloading it.
+
+```{r load_apps}
+apps <- read.csv('googleplaystore.csv', stringsAsFactors=FALSE)
+str(apps)
+```
+
+```{r load_reviews}
+reviews <- read.csv('googleplaystore_user_reviews.csv', stringsAsFactors=FALSE)
+str(reviews)
+```
+
+## 2.3  Cleaning App Data
+
+The preview of the `apps` data set shows that all of the attributes besides `Rating` have been loaded as `character` vectors, which is not exactly ideal. Closer inspection of the data reveals that the app called "Life Made WI-Fi Touchscreen Photo Frame" is missing values for `Category` and `Genres`, so we will revise that row in the data frame ourselves (missing attribute values were found by searching on the Play Store at the time of writing).
+
+```{r fix_entry}
+apps[10473,] <- list("Life Made WI-Fi Touchscreen Photo Frame",  # App
+                "LIFESTYLE",                                     # Category
+                1.9,                                             # Rating
+                "19.0",                                          # Reviews
+                "3.0M",                                          # Size
+                "1,000+",                                        # Installs
+                "Free",                                          # Type
+                "0",                                             # Price
+                "Everyone",                                      # Content.Rating
+                "Lifestyle",                                     # Genres
+                "February 11, 2018",                             # Last.Updated
+                "1.0.19",                                        # Current.Ver
+                "4.0 and up")                                    # Android.Ver
+```
+
+Though this solves one problem, there still remains the issue that the columns' types are not all suited to analysis. `App` and `Current.Ver` can stay as `character` vectors; let's go through and modify the other attributes that need adjustment (note: more attributes than will be used later are edited for illustrative purposes).
+
+### 2.3.1  Category
+
+Since there are only so many possible values of `Category`, we will convert this column to be of type `factor`. No row is missing this attribute, so conversion is simple.
+
+```{r clean_category}
+apps <- mutate(apps, Category=as.factor(Category))
+```
+
+### 2.3.2  Rating
+
+`Rating` is already a `numeric` type, so no operation is technically necessary. For consistency's sake, however, we could convert the `NaN`s that appear into `NA`s.
+
+```{r clean_ratings}
+apps <- mutate(apps, Rating=ifelse(is.nan(Rating), NA, Rating))
+```
+
+### 2.3.3  Reviews
+
+Another easy conversion---every row has a value for its `Reviews` column that directly translates into an integer, so we can convert this attribute to `numeric` without any other preparation.
+
+```{r clean_reviews}
+apps <- mutate(apps, Reviews=as.numeric(Reviews))
+```
+
+### 2.3.4  Size
+
+`Size` is formatted in the data set as a number followed by a prefix abbreviation. To keep units consistent, we will eliminate the abbreviation and convert the column to be a `numeric` represention of kilobytes. Entries with "Varies with device" will end up being converted into `NA`, which is fine for now, as there is no way to infer the app size if it's not provided.
+
+```{r clean_size}
+# Extract the numeric portion of the Size column
+digits <- as.numeric(str_extract(apps$Size, '\\d+'))
+# Extract the character portion and obtain its equivalent conversion factor
+prefix <- toupper(str_extract(apps$Size, '[KkMm]'))
+kb_factor <- c(1, 1000)[match(prefix, c('K', 'M'))]
+# Replace the column
+apps <- mutate(apps, Size=(digits * kb_factor))
+```
+
+### 2.3.5  Installs
+
+The number of times an app is installed is not given as an exact integer, but as a lower bound. We will preserve this interpretation and remove any instances of "," and "+" to be able to convert the `character`s to `numeric`s.
+
+```{r clean_installs}
+apps <- mutate(apps, Installs=as.numeric(gsub('\\+', '', gsub(',', '', Installs))))
+```
+
+### 2.3.6  Type
+
+Unforunately, not every observation in the data set has a `Type` that is either "Free" or "Paid"; fortunately, there is only one such deviant observation, which has a `Type` of "NaN" and can be manually replaced with "Free", since its `Price` is 0 (if we were unluckier and had a large number of rows with "NaN" as their `Type`, a more generalized approach would be taken to infer the correct value). Once this single entry is corrected, we can convert the entire column to be of type `factor`.
+
+```{r clean_type}
+apps[9149, 7] <- "Free"
+apps <- mutate(apps, Type=as.factor(Type))
+```
+
+### 2.3.7  Price
+
+`Price` is represented as a `character` vector with dollar signs before any cost that isn't 0. Those signs must be eliminated before conversion to a `numeric` type is possible.
+
+```{r clean_price}
+apps <- mutate(apps, Price=as.numeric(gsub('\\$', '', Price)))
+```
+
+### 2.3.8  Content Rating
+
+`Content.Rating` has five enumerated values plus the "Unrated" value, which lends itself nicely to being a `factor`.
+
+```{r clean_content_rating}
+apps <- mutate(apps, Content.Rating=factor(Content.Rating))
+```
+
+### 2.3.9  Genres
+
+The problem with attempting to convert `Genres` to the `factor` type is that apps can be tagged with more than one genre. Luckily for us, the apps in this data set have at most two genres at once, so we will split the `Genres` attribute into two `factor` columns, where the second column can be `NA` if only one genre is provided.
+
+```{r clean_genres}
+# Split column into two
+apps <- separate(apps, Genres, c('Genre1', 'Genre2'), ';', fill='right')
+# Rather than coerce directly, build factor manually so both columns can use the same levels including NA
+apps <- mutate(apps, Genre1=factor(Genre1, levels=unique(Genre1), exclude=''))
+apps <- mutate(apps, Genre2=factor(Genre2, levels=levels(Genre1)))
+```
+
+### 2.3.10  Last Updated
+
+Since the dates are formatted consistently across every row, we will convert `Last.Updated` to the appropriately-named `Date` object type.
+
+```{r clean_last_updated}
+apps <- mutate(apps, Last.Updated=as.Date(Last.Updated, format='%B %d, %Y'))
+```
+
+### 2.3.11  Android Version
+
+There are 32 unique values used in the data set to represent the ranges of Android compatibility if "Varies with device" and "NaN" are excluded. After converting "NaN" to `NA`, the rest of the character vectors can be treated as `factor`s.
+
+```{r clean_android_ver}
+apps <- mutate(apps, Android.Ver=ifelse(Android.Ver=="NaN", NA, Android.Ver))
+apps <- mutate(apps, Android.Ver=factor(Android.Ver, levels=unique(Android.Ver), exclude=NA))
+```
+
+## 2.4  Cleaning Review Data
+
+The text of the user reviews themselves are not particularly helpful to us; however, the data set is kind enough to provide additional values that *are* useful. Of these values, we will consider `Sentiment_Polarity` and `Sentiment_Subjectivity`. `Sentiment` will not be used because it can be inferred from the sign of `Sentiment_Polarity` and provides less information than its `numeric` counterpart. As far as data tidying goes, we need to prepare the desired columns for reporting in aggregate, so we'll summarize `reviews` to create a new table that displays the arithmetic mean for each unique app.
+
+```{r clean_review_data}
+review_averages <- reviews %>%
+  group_by(App) %>%
+  summarize(Mean_Polarity=mean(Sentiment_Polarity, na.rm=TRUE), Mean_Subjectivity=mean(Sentiment_Subjectivity, na.rm=TRUE)) %>%
+  mutate(Mean_Polarity=ifelse(is.nan(Mean_Polarity), NA, Mean_Polarity),
+        Mean_Subjectivity=ifelse(is.nan(Mean_Subjectivity), NA, Mean_Subjectivity))
+```
+
+## 2.5  Putting the Data Together
+
+The entities represented by the `reviews` table are, of course, user reviews of apps. That's not what we're interested in, though. We want to look at the apps themselves, so we will join the `review_averages` table (whose rows actually represent apps) with the `apps` table to produce a master data set that we will simply call `data`.
+
+```{r join}
+data <- left_join(apps, review_averages, by='App')
+```
+
+We now have the complete data set we will be working with!
+
+```{r full_data_preview}
+str(data)
+```
+
+# 3  Exploratory Data Analysis
+
+With data tidying out of the way, it's time to see if there are any notable relationships between the different attributes. One variable that a developer would probably be interested in is the number of times their app gets downloaded---i.e., how popular their software is. It's not unreasonable to assume that most, if not all, of the attributes in our data set factor into an end user's decision to tap the "Install" button on the Play Store, so to get started, let's consider the impact of `Price`.
+
+## 3.1  Price
+
+Instinct says to check how an app's `Price` affects its installation count using a basic scatterplot; however, given the size of our data set, it's likely that we'll run into issues with overplotting and end up with a hard-to-read plot. A better sense of the distribution of `Price` would be nice, so as a preliminary check we'll observe quantiles.
+
+```{r price_outliers}
+quantile(data$Price, probs=seq(0, 1, 0.1))
+```
+
+It's quite clear that the vast majority of the apps in our data set are free of charge. To keep things fair using the data we have, we'll only consider free apps from this point forward and investigate the effect of attributes besides `Price`.
+
+```{r filter_price}
+data <- filter(data, Price==0)  # Filter out any apps with a cost of not $0.00
+```
+
+## 3.2  Installs (Transformed) vs. Rating
+
+Let's see if `Rating` has any correlation with `Installs` using a scatterplot, grouped by `Category`. For the sake of relationship-checking, and because the range of minimum installation counts is so expansive, we will transform our y-axis values onto a friendlier scale by taking the natural log of `Installs`.
+
+```{r installs_vs_rating_by_category}
+data %>%
+  filter(!is.na(Rating)) %>%
+  ggplot(aes(x=Rating, y=log(Installs))) +
+    geom_count(aes(color=Category))  # geom_count() deals with overlap better than geom_point()
+```
+
+It appears that highly-rated free apps have a wide range of potential users, whereas poorly-rated free apps tend to remain less popular. No single category of app stands out as different from this trend. We can quantitatively determine if the relationship between `log(Installs)` and `Rating` is approximately linear by performing a regression test.
+
+```{r installs_vs_rating_regression}
+fit <- lm(log(Installs) ~ Rating, data=filter(data, !is.na(Rating)))
+summary(fit)
+```
+
+Given the extremely small $p$-value for `Rating`, we can conclude that the slope of the line for `log(Installs)` vs. `Rating` differs from 0 and that this result is statistically significant---i.e., the two attributes are, with high probability, positively correlated.
+
+## 3.3.  Installs (Transformed) vs. Mean Polarity and Mean Subjectivity
+
+Our impressions of an app (or any product, for that matter) are swayed by the voiced opinions of others, so it stands to reason that the average sentiment polarity---whether the average user review is positive or negative---may help predict an app's popularity. Let's verify this visually by plotting `Mean_Polarity` against `log(Installs)`.
+
+```{r installs_vs_polarity}
+data %>%
+  filter(!is.na(Mean_Polarity)) %>%
+  ggplot(aes(x=Mean_Polarity, y=log(Installs))) +
+    geom_count(aes(color=Category))
+```
+
+The relationship between average sentiment polarity and transformed minimum installation count among free apps is not apparent: user reviews tend towards being positive no matter how popular an app is. To be sure of this intuition, we will again perform a regression test.
+
+```{r installs_vs_polarity_regression}
+fit <- lm(log(Installs) ~ Mean_Polarity, data=filter(data, !is.na(Mean_Polarity)))
+summary(fit)
+```
+
+There's high probability of a linear relationship after all, though perhaps not in the expected way, as the linear fit estimates a negative slope. This would mean that the more positive an app's reviews lean, the fewer installations it probably has.
+
+It's also worth considering that views steeped in obvious subjectivity may not hold as much weight as those noting an app's flaws and features dispassionately. Let's try to take this into account mathematically by multiplying `Mean_Polarity` by $1 -$`Mean_Subjectivity` in our analysis.
+
+```{r installs_vs_polarity_and_subjectivity}
+adjusted_data <- data %>%
+  filter(!is.na(Mean_Polarity) & !is.na(Mean_Subjectivity)) %>%
+  mutate(Adjusted_Polarity=(Mean_Polarity * (1 - Mean_Subjectivity)))
+ggplot(adjusted_data, aes(x=Adjusted_Polarity, y=log(Installs))) +
+  geom_count(aes(color=Category))
+```
+
+```{r installs_vs_polarity_and_subjectivity_regression}
+fit <- lm(log(Installs) ~ Adjusted_Polarity, data=adjusted_data)
+summary(fit)
+```
+
+As it turns out, the conclusions to be made are pretty much the same, with or without `Mean_Subjectivity` taken into account.
+
+## 3.4  Installs vs. Content Rating
+
+Checking the relationship between `Installs` and `Content.Rating` could provide insight into user demographics. To see how much each `Content.Rating` category contributes to the total `Installs` value, we'll use a bar graph. 
+
+```{r installs_proportion_vs_content_rating}
+Installs.Total <- sum(data$Installs)
+data %>%
+  group_by(Content.Rating) %>%
+  summarize(Content.Rating.Total=sum(Installs)) %>%
+  ggplot(aes(x=Content.Rating, y=(Content.Rating.Total / Installs.Total))) +
+    geom_bar(stat='identity') +
+    labs(y='Installs Proportion')
+```
+
+The majority of app downloads on the Play Store come from apps rated for everyone; meanwhile, apps that are not rated at all or are meant for adults only contribute a negligible amount to the overall installation count.
+
+For illustration of distribution with each category, we'll use a boxplot.
+
+```{r installs_vs_content_rating}
+data %>%
+  mutate(Log.Installs=ifelse(Installs == 0, 0, log(Installs))) %>%
+  ggplot(aes(x=Content.Rating, y=Log.Installs)) +
+    geom_boxplot()
+```
+
+The categories that contribute a meaningful amount to the `Installs` total vary widely from app to app, which is to be expected. To conclude our exploratory analysis, we will test for a linear relationship between `Installs` and the categories of `Content.Rating`.
+
+```{r installs_vs_content_rating_regression}
+adjusted_data <- data %>%
+  mutate(Log_Installs=ifelse(Installs == 0, 0, log(Installs)))
+fit <- lm(Log_Installs ~ Content.Rating, data=adjusted_data)
+summary(fit)
+```
+
+The slopes shown in the regression summary do not significantly differ from the slope estimated when an app's `Content.Rating` is "Adults only 18+", and because the categories do not differ enough from each other, it would be best to exclude them from use in prediction.
+
+# 4  Predictive Modeling
+
+Although other attributes might plausibly contribute to prediction, we will focus on predicting `Installs` based on `Rating` as well as interaction between `Mean_Polarity` and `Mean_Subjectivity` using a linear model to reflect the data analyses above.
+
+## 4.1  Distinguishing Training and Testing Data
+
+The data used to train a machine learning model should not include the same observations we plan to evaluate the model's performance with; therefore, we need to set aside a portion of the full data set exclusively for training. To ensure a large training set size, we will use *10-fold cross validation* as our evaluation method. We will also use the natural log of `Installs` as our variable of interest to align with our exploratory analyses.
+
+## 4.2  Fitting and Evaluation
+
+A few helper definitions for the upcoming testing:
+
+```{r helper}
+# Complete data set to be used for modeling
+model_data <- data %>%
+  select(Installs, Rating, Mean_Polarity, Mean_Subjectivity) %>%
+  filter(!is.na(Rating) & !is.na(Mean_Polarity) & !is.na(Mean_Subjectivity)) %>%
+  mutate(Log_Installs=ifelse(Installs == 0, 0, log(Installs)))
+
+# Number of folds
+k <- 10
+
+# Create partitions
+partitions <- caret::createFolds(model_data$Log_Installs, k=k)
+
+# Define bin boundaries between Installs values
+thresholds <- log(sort(unique(data$Installs))[-1])
+
+# Return whether or not `a` and `b` belong to the same Installs bin
+bin_match <- function(a, b, bin_thresholds) {
+  for (i in 1:(length(bin_thresholds) - 1)) {
+    if (a >= bin_thresholds[i] && a < bin_thresholds[i + 1]) {
+      if (b >= bin_thresholds[i] && b < bin_thresholds[i + 1]) {
+        return(TRUE)
+      }
+      return(FALSE)
+    }
+  }
+  return(a >= last(bin_thresholds) && b >= last(bin_thresholds))
+}
+```
+
+### 4.2.1  Linear Regression with Interaction
+
+First we'll test the effectiveness of *linear regression* under the assumption that `Mean_Polarity` and `Mean_Subjectivity` interact with each other.
+
+```{r linear_fit, warning=FALSE}
+# Iterate over folds
+linear_res <- lapply(seq_along(partitions),  function(i) {
+  # Train model
+  fit <- lm(Log_Installs ~ Rating + Mean_Polarity * Mean_Subjectivity, data=model_data[-partitions[[i]],])
+  
+  # Make predictions on the holdout set
+  preds <- predict(fit, newdata=model_data[partitions[[i]],])
+  
+  # Compute true/false positive rates from the holdout set
+  correct <- sum(ifelse(
+    bin_match(preds, model_data$Log_Installs[partitions[[i]]], thresholds),
+    1,
+    0
+  ))
+  incorrect <- length(preds) - correct
+  
+  # Collect values for this fold
+  data_frame(iteration=i, correct, incorrect)
+})
+
+# Combine values across all folds into a single data frame
+do.call(rbind, linear_res)
+```
+
+The column labeled "correct" indicates the number of accurately-predicted `log(Installs)` estimates within a fold, whereas the "incorrect" column indicates the opposite. It's pretty obvious without any further analysis that this model is an extremely poor predictor of `log(Installs)`.
+
+### 4.2.2  Regression Tree
+
+Since linear regression went so poorly, how about a new model? Here we will grow *regression trees* and perform the same 10-fold cross validation, with the only catch being that we will have to adjust our formula, since we cannot use interaction terms. Consequently, we'll exclude `Mean_Subjectivity` and use `Mean_Polarity` as a standalone predictor.
+
+```{r tree_fit, message=FALSE, warning=FALSE}
+tree_res <- lapply(seq_along(partitions),  function(i) {
+  fit <- tree::tree(Log_Installs ~ Rating + Mean_Polarity, data=model_data[-partitions[[i]],])
+  
+  preds <- predict(fit, newdata=model_data[partitions[[i]],])
+  
+  correct <- sum(ifelse(
+    bin_match(preds, model_data$Log_Installs[partitions[[i]]], thresholds),
+    1,
+    0
+  ))
+  incorrect <- length(preds) - correct
+
+  data_frame(iteration=i, correct, incorrect)
+})
+
+do.call(rbind, tree_res)
+```
+
+Unfortunately, this model is equally bad at predicting `log(Installs)`.
+
+### 4.2.3  Linear Regression without Interaction
+
+To make a fairer comparison between the two approaches, we will check the performance of linear regression without the interaction between `Mean_Polarity` and `Mean_Subjectivity` and use the former alone.
+
+```{r linear_fit_2, warning=FALSE}
+linear_res_2 <- lapply(seq_along(partitions),  function(i) {
+  fit <- lm(Log_Installs ~ Rating + Mean_Polarity, data=model_data[-partitions[[i]],])
+  
+  preds <- predict(fit, newdata=model_data[partitions[[i]],])
+  
+  correct <- sum(ifelse(
+    bin_match(preds, model_data$Log_Installs[partitions[[i]]], thresholds),
+    1,
+    0
+  ))
+  incorrect <- length(preds) - correct
+  
+  data_frame(iteration=i, correct, incorrect)
+})
+
+do.call(rbind, linear_res)
+```
+
+There is no change in the performance, sadly. Out of more than 1,000 observations to predict, the model still only correctly estimated two values.
+
+# 5  Conclusions
+
+We took a publicly-available data set on Google Play Store apps and user reviews and prepared it for analysis by editing an incorrectly-entered row, standardizing units, and changing column types. We focused our project by eliminating paid apps from analysis and transformed minimum installation count to use a more suitable scale. We visually examined the relationships between installations and attributes such as rating, app category, and review sentiment. We confirmed the existence of such relationships through tests of slope using the built-in null hypothesis of linear slope coefficient being 0. Finally, we trained linear regression and regression tree models based on the assumption of a linear relationship between installations and rating + sentiment but found it to be an inaccurate predictor.
+
+In truth, the assumption of linearity was probably poorly founded, which warrants future investigation into the true nature of installation count's relationship with its app store data (i.e., seeing that it is, in fact, not linear). In addition to exploring other relationships, there is always the avenue of trying out different modeling methods such as random forests.
+
+Getting the chance for insight into the Play Store and the wider population of apps I never even knew existed was both a fun and informative experience. Professionals are almost certainly performing similar analyses of apps for development/marketing purposes already, so practicing now can only be beneficial for any future work or research.
+
+# 6  Additional Reading
+
+- Google Play Store Data: https://www.kaggle.com/lava18/google-play-store-apps
+- `ggplot2` tutorial: http://tutorials.iq.harvard.edu/R/Rgraphics/Rgraphics.html
+- Linear regression in R tutorial: https://www.r-bloggers.com/simple-linear-regression-2/
+- Notes on model evaluation: https://www.hcbravo.org/IntroDataSci/bookdown-notes/model-selection-and-evaluation.html
