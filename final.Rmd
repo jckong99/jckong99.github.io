@@ -2,7 +2,12 @@
 title: "A Data Science Walkthrough Using Google Play Store App Data"
 author: "Jim Kong"
 date: "5/16/2020"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: lumen
 ---
 
 # 1  Introduction
